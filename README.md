@@ -99,3 +99,15 @@ The default pipeline is English-only. To use other languages, switch to a multil
 5. Experiment with vLLM-Omni native speech-to-speech when a suitable GPU is available.
 
 This is a development POC, not a production-ready voice agent.
+
+## Development with Codex
+
+Codex should start with [AGENTS.md](AGENTS.md), then use the following source-of-truth documents:
+
+- [PLAN.md](PLAN.md) — milestone roadmap and exit criteria
+- [TASKS.md](TASKS.md) — ordered implementation backlog and first coding assignment
+- [docs/PRODUCT.md](docs/PRODUCT.md) — product scope and acceptance criteria
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — current design and planned module boundaries
+- [docs/TESTING.md](docs/TESTING.md) — manual checks and test strategy
+
+**Suggested first Codex prompt:** "Read AGENTS.md, PLAN.md, TASKS.md and the docs/ directory. Implement P1.1 as the smallest testable refactor without changing the CPU-only V1 user experience. Add mocked pytest tests, update docs and report exactly what was/was not tested."

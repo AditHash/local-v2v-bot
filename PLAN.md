@@ -1,73 +1,74 @@
-# Implementation plan — local-v2v-bot
+# Plan — evaluate vLLM-Omni for a voice-to-voice chatbot
 
-**North star:** a private voice assistant that listens, responds naturally in speech, and can eventually be interrupted mid-answer. **Near-term constraint:** no GPU, Windows laptop, minimal memory consumption and no paid inference APIs.
+## Single goal
 
-Status terms: **Scaffolded** means source exists but was not validated with real devices; **Planned** means not implemented. Only mark **Verified** after an actual successful local test.
+Demonstrate **native speech input → vLLM-Omni speech-capable model → generated speech output**, and determine whether full-duplex serving is viable for a future voice chatbot.
 
-## Phase 0 — Validate current push-to-talk POC (next)
+The previous CPU **Whisper → Ollama → Piper** app is **not the primary POC**. It remains as a control/baseline, but will not be a prerequisite or substitute for native Omni testing.
 
-**Status: Scaffolded; runtime verification pending.**
+## Constraints / strategy
 
-- Install dependencies and weights following `README.md`.
-- Make a successful short microphone → transcript → Ollama answer → synthesized audio round trip.
-- Test multi-turn memory and clear-conversation behavior.
-- Record STT, LLM, TTS, and total latency plus CPU/RAM observations.
-- Fix any installer, audio encoding, Windows temporary-file, or Ollama compatibility issues uncovered.
+- Development laptop: Windows without a capable GPU. Test UI/client/protocol handling with mocks and fixtures locally.
+- Inference: use a **self-managed Linux GPU host** when available. This can be on-prem or a temporary rented GPU. Avoid paid third-party model APIs. Remote hosting is self-hosted but **not physically local/offline**.
+- First model: `openbmb/MiniCPM-o-4_5` with duplex config `vllm_omni/deploy/minicpmo_4_5.yaml`. Confirm model and hardware compatibility on the actual host.
+- Protocol: `/v1/realtime?duplex=1`; verify `session.created.session.capabilities` before relying on overlap, playback ACK and interruptions.
 
-**Exit condition:** a reproducible Windows CPU run with no cloud inference, plus documented results and known limitations.
+## O0 — Grounded server recipe and experiment design
 
-## Phase 1 — Make the CPU baseline robust and testable
+**Status: Documented; GPU execution pending.**
 
-**Status: Planned. See `TASKS.md` for the first coding slice.**
+- [ ] Choose a specific Linux GPU host, CUDA/driver versions, available VRAM and disk, and pinned vLLM + vLLM-Omni versions.
+- [ ] Confirm model weight license/terms, download size, dependencies and actual memory use.
+- [ ] Start duplex server using the **matching upstream release**.
+- [ ] Confirm `/health`, `/v1/models` and a duplex WebSocket handshake with capability fields.
+- [ ] Run the upstream `realtime_duplex_demo.py` using a 16 kHz mono PCM16 input WAV and any required reference voice audio.
 
-- Extract testable STT/LLM/TTS orchestration from `app.py` with lazy loading or dependency injection; keep Gradio UX intact.
-- Add deterministic tests, error handling, structured timing, and bounded conversation memory.
-- Provide explicit offline mode preflight checks, model missing diagnostics, and temporary audio cleanup.
-- Add optional text-only smoke test to debug Ollama independently of microphone/audio devices.
-- Establish a small release/test checklist.
+**Exit:** official sample yields audible response on the GPU server; collect setup steps and timings.
 
-**Exit condition:** core orchestration unit-tested without weights/hardware; end-to-end workflow still runnable.
+## O1 — Minimum independent Omni client (first Codex work)
 
-## Phase 2 — Lower perceived latency / streaming POC
+**Status: Planned; can be developed CPU-only.**
 
-**Status: Planned, must remain viable without GPU.**
+- Build simple Python CLI accepting input WAV, WebSocket URL, model ID, optional reference voice and output directory.
+- Use official `DuplexClient`/MiniCPM-o preset if feasible; otherwise implement a wire-compatible client with tests.
+- Wait for valid session and capability negotiation. Stream correctly encoded audio, handle generated audio events, and write playable audio plus summary metadata.
+- Add fake-transport tests, timeouts and error diagnostics. Allow the **client** to run on Windows without server-side GPU packages.
+- Validate against the real server once O0 infrastructure exists.
 
-- Evaluate WebSocket-based local mic streaming with a **small proof**; retain the push-to-talk fallback.
-- Add audio capture buffering and speech end detection (VAD). Be explicit about sample rate, mono PCM, buffering, silence thresholds, and UX.
-- Stream Ollama tokens and split replies into speech-friendly chunks for TTS.
-- Start speech playback before the full answer finishes where feasible.
-- Capture time-to-first-token, time-to-first-audio and full-turn latency.
-- Investigate CPU load / scheduling contention; never claim real-time performance without measurements.
+**Exit:** first recorded voice question goes through vLLM-Omni and produces spoken response. Mock tests alone are not the exit criterion.
 
-**Exit condition:** a local demo showing partial response playback and metrics, with deterministic unit tests for stream/turn handling.
-
-## Phase 3 — Natural conversation / interruptions
+## O2 — Live microphone and speaker POC
 
 **Status: Planned.**
 
-- Implement a bounded session state machine (idle → listening → processing → speaking → interrupted).
-- Detect when a user begins speaking during audio playback.
-- Cancel or discard pending LLM/TTS work, stop queued playback, and start the next turn without stale audio.
-- Make cancel/session lifecycle explicit; add concurrency, race-condition, and reconnect tests.
-- Consider WebRTC/LiveKit only if measurable benefit outweighs the additional complexity.
+- Capture and resample microphone audio at client side.
+- Stream continuously to Omni; play returned audio as chunks arrive.
+- Show live connection state, session events and optional model-provided transcripts.
+- Keep existing WAV CLI for reproducible tests.
+- Collect time-to-first-audio, end-to-end latency, glitches and network conditions.
 
-**Exit condition:** reliable interruption demo, with observed limitation notes for CPU-only hardware.
+**Exit:** repeatable live two-way audio in a local browser or desktop client connected to self-hosted vLLM-Omni.
 
-## Phase 4 — Optional native speech-to-speech experiment
+## O3 — Evaluate real-time behavior
 
-**Status: Research only; GPU not currently available.**
+**Status: Planned.**
 
-- On suitable GPU infrastructure, evaluate vLLM-Omni and a compatible speech-in/speech-out model.
-- Keep the transport/UI independent of inference backend; introduce a model adapter rather than replacing the CPU implementation.
-- Compare quality, speech round-trip latency, memory, interruptions, and transcription visibility.
-- Decide from measurements whether to keep modular STT→LLM→TTS or add an Omni backend.
+- Test simultaneous input/output, model-triggered turn transitions, overlapping speech and interruption.
+- Use capability flags; report 'unsupported' rather than simulating model support.
+- Send playback acknowledgements for audio actually played, not merely received or buffered.
+- Test session reconnection/close, buffer sizing, backpressure and multi-turn consistency.
 
-**Exit condition:** optional benchmark and recommendation; CPU path continues to work.
+**Exit:** documented demonstration or limitation of full-duplex behavior on the selected model.
 
-## Priority and scope boundaries
+## O4 — Compare alternatives and make decision
 
-Priority: **get the existing POC working** → **make it testable** → **measure** → **stream** → **interruptions** → **optional GPU comparison**.
+**Status: Planned.**
 
-Out of scope for now: commercial telephony integration, speaker verification, RAG, SaaS auth, storing audio/transcripts, production multi-tenancy, self-hosted vLLM on unsupported CPU hardware, and a full React rewrite.
+- Benchmark MiniCPM-o vs a compatible Qwen3-Omni deployment (if sufficient GPU available).
+- Compare with optional legacy modular Ollama/Whisper/Piper only as a baseline for latency, robustness and quality.
+- Report GPU/VRAM usage, setup complexity, response quality, interruption support, and per-minute infrastructure costs using *actual measurements*.
+- Decide whether to pursue a production voice agent with vLLM-Omni.
 
-See `docs/PRODUCT.md` for requirements, `docs/ARCHITECTURE.md` for current/planned boundaries, and `docs/TESTING.md` for verification.
+**Exit:** an evidence-based recommendation, not just a working UI.
+
+**Read:** `TASKS.md`, `docs/OMNI_POC.md`, `docs/ARCHITECTURE.md`, `docs/TESTING.md`.

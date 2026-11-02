@@ -1,89 +1,69 @@
-# Architecture and extension guide
+# Architecture — Omni POC first
 
-## Current V1 architecture (implemented as a scaffold)
-
-```text
-Windows browser (Gradio)
-    microphone WAV/file
-          |
-          v
-app.py: respond(audio_path, history)
-    |-- faster-whisper tiny.en / CPU int8 (STT)
-    |-- Ollama localhost:11434 / qwen3:0.6b (LLM)
-    |-- Piper en_US-lessac-medium (TTS)
-    '-- time.perf_counter() stage timing
-          |
-          v
-Gradio transcript + text answer + WAV playback + history
-```
-
-Model objects are constructed at module import; `respond` currently owns all business logic. `gr.State` holds conversation memory in the browser session. This works for a small demo but makes headless tests difficult. The Whisper call uses `vad_filter=True` to filter the recording; it is **not** a live VAD gate.
-
-## Proposed CPU-friendly module boundaries (future, not implemented)
+## Target POC (planned)
 
 ```text
-app.py                       Gradio UI and event binding
-voice_bot/config.py          Local-first configuration + validation
-voice_bot/pipeline.py        Turn orchestration and structured result
-voice_bot/stt.py             Local speech transcription adapter
-voice_bot/llm.py             Local Ollama adapter
-voice_bot/tts.py             Piper WAV synthesis adapter
-voice_bot/session.py         Bounded conversation state
-voice_bot/timing.py          Stage measurements
-tests/                      Dependency-free mocked core tests
+Windows laptop (CPU client)        secure tunnel/WSS       Linux GPU inference
+ +----------------------+     WebSocket duplex API     +----------------------+
+ | recorded WAV         | --------------------------> | vLLM-Omni server     |
+ | later: microphone    |  PCM input, session events  | MiniCPM-o 4.5        |
+ |                      | <-------------------------- | duplex session       |
+ | WAV writer / speaker |  PCM audio output, events   | speech→speech model  |
+ +----------------------+                             +----------------------+
 ```
 
-Do not create unused abstractions: start by extracting orchestration and injecting model adapter callables in task P1.1. Introduce other modules only when a task benefits from them.
+The **single model pipeline** performs speech understanding and speech generation. Do not call separate Whisper/Ollama/Piper in this path.
 
-## Desired application-level contracts
+## vLLM-Omni APIs
 
-`process_turn(audio_path, history)` should eventually yield a structured result such as:
-- `transcript: str`
-- `reply_text: str`
-- `audio_path: Path | None`
-- `history: list[role/content message]`
-- `timings_ms: {stt, llm, tts, total}`
+- Duplex endpoint: `ws://HOST:8091/v1/realtime?duplex=1` (or `/v1/duplex`).
+- Deploy configuration must set `session_mode: duplex`; the model's pipeline must supply a duplex plugin.
+- Actual session capabilities are negotiated in `session.created.session.capabilities`.
+- Typical lifecycle: connect → `session.update` → `session.created` → `input_audio_buffer.append` → `input_audio_buffer.commit` as applicable → response events including `response.output_audio.delta` → `response.done` or `response.listen` → optional accurate playback ACK → `session.close`.
+- **Important:** duplex protocol and turn-based `/v1/realtime` are not interchangeable for all deployments.
+- Use the official version-compatible `DuplexClient` if feasible instead of hand-rolling frame/event handling.
 
-An orchestration result should be plain Python data, not a Gradio UI object. UI adapters map the result to components and convert exceptions into friendly errors. Keep message roles explicit (`system`, `user`, `assistant`); never treat untrusted user transcripts as system instructions. Avoid empty utterances reaching the LLM.
-
-## Runtime boundaries and privacy
-
-- Whisper weights, Ollama weights and Piper voices must be locally available. Validate availability before processing.
-- Ollama's URL defaults to `http://127.0.0.1:11434`. Gradio binds to `127.0.0.1:7860` with `share=False`.
-- Do not turn on public sharing, network-exposed interfaces, cloud APIs or analytics without explicit user approval.
-- Audio inputs may be saved in local temporary locations by the UI/runtime, and output WAV files are currently created with `delete=False`. Cleanup belongs in task P1.2; do not claim that all audio is immediately deleted.
-- No transcript database or cloud recording is planned for V1.
-
-## Planned streaming design (not implemented)
+## Proposed project structure (not yet implemented)
 
 ```text
-Mic capture -> local audio frames -> transport -> VAD/turn detector
-                                      |
-                                      v
-                              Turn/session controller
-                                      |
-                                      v
-                             Ollama stream -> text chunks
-                                      |
-                                      v
-                             Piper/local TTS -> audio chunks
-                                      |
-                                      v
-                            Playback queue (cancelable)
+AGENTS.md
+PLAN.md
+TASKS.md
+docs/OMNI_POC.md
+docs/ARCHITECTURE.md
+docs/PRODUCT.md
+docs/TESTING.md
+omni_client/
+  cli.py                 WAV client / entrypoint
+  audio.py               Validate PCM, chunking, WAV output
+  client.py              DuplexClient transport wrapper
+  metrics.py             Client timing and event summaries
+tests/
+  test_audio.py
+  test_omni_client.py    fakes / mocked websocket, no GPU required
+app.py                   LEGACY modular CPU demo (not Omni)
+requirements.txt         LEGACY dependencies (not Omni client dependencies)
 ```
 
-A possible local WebSocket protocol uses typed events: `session.start`, `audio.chunk`, `turn.end`, `transcript.final`, `assistant.text.delta`, `assistant.audio.chunk`, `assistant.done`, `assistant.cancel`, and `error`. **This is a design proposal, not an implemented API.** Choose PCM sample format/rate explicitly and test resampling and buffer limits.
+Place new client dependencies in a distinct requirements file or project metadata. The **client** must remain lightweight and CPU-capable; only the **server** needs GPU.
 
-For interruption: mark a response with a monotonically increasing turn ID; cancel or ignore output from previous turn IDs; stop client playback immediately; guard against races when TTS chunks finish late. Separate transport, session state and inference backend so the UI can later call a vLLM-Omni adapter.
+## Model-specific considerations
 
-## Future vLLM-Omni option
+- MiniCPM-o 4.5 is the first candidate because official vLLM-Omni docs show a duplex deployment and WAV example.
+- Qwen3-Omni is an optional comparison; hardware and deploy config differ.
+- A duplex session may support simultaneous input/output yet not advertise all interruption controls. Feature-gate `barge-in`, playback acknowledgement, resume and transcripts.
+- Model may generate encoded/raw audio chunks. Respect the negotiated output format; save a valid WAV with correct sample rate.
+- State and history may be held server-side; do not inject synthetic unrelated text turns expecting native speech generation.
 
-A future GPU deployment may use a supported native speech-to-speech model. Keep an adapter seam between transport/session orchestration and inference; never assume a model offers transcripts, interruption semantics, or Windows CPU compatibility simply because it supports audio. Benchmark the actual backend and only then decide on architectural migration.
+## Current legacy code (already committed)
 
-## Open questions to resolve from measurements
+`app.py` is Gradio with faster-whisper, Ollama and Piper. It is **not a vLLM-Omni implementation**. Do not refactor it as the first assignment. Once Omni works, compare latency against it if desired.
 
-- What is the real RAM/CPU budget while Whisper, Ollama and Piper coexist?
-- Which STT size produces acceptable accuracy at acceptable speed?
-- Is chunked Piper playback good enough, or is a different local TTS backend needed?
-- Does Windows microphone input require resampling for streaming frames?
-- What are actual turn-boundary and barge-in delays on CPU?
+## Security / reproducibility
+
+- Serve inference on loopback and connect over SSH tunnel or authenticated network.
+- Do not open a public unauthenticated websocket server or commit real audio/voice files.
+- Record server versions, model revisions, GPU specs and audio formats in test report.
+- Test mocked client logic locally; run the actual model only where GPU is available.
+
+**Details:** `docs/OMNI_POC.md`.
